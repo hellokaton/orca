@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events'
 import { deserialize } from 'node:v8'
 import type { Worker } from 'node:worker_threads'
-import { utilityProcess, type UtilityProcess } from 'electron'
+import { app, utilityProcess, type UtilityProcess } from 'electron'
 import { recordDurableCrashBreadcrumb } from '../crash-reporting/breadcrumbs/durable-crash-breadcrumb'
 import type {
   UtilityWorkerFailure,
@@ -13,6 +13,8 @@ import type {
 /** A host that cannot start in time loses its workers to in-process threads for the session. */
 const HOST_READY_TIMEOUT_MS = 4_000
 const HOST_IDLE_EXIT_MS = 30_000
+
+let quitting = false
 
 export type HostedWorkerThread = Pick<
   Worker,
@@ -144,7 +146,11 @@ export class UtilityWorkerHost {
     private readonly serviceName: string,
     private readonly entryPath: () => string,
     private readonly spawnInProcess: (spawn: UtilityWorkerSpawn) => Worker
-  ) {}
+  ) {
+    app.once('before-quit', () => {
+      quitting = true
+    })
+  }
 
   spawn(spawn: UtilityWorkerSpawn): HostedWorkerThread {
     if (this.unavailable) {
@@ -283,11 +289,13 @@ export class UtilityWorkerHost {
     }
     const workers = [...host.workers.values()]
     this.retire(host)
-    recordDurableCrashBreadcrumb('utility_worker_host_exited', {
-      serviceName: this.serviceName,
-      code,
-      workers: workers.length
-    })
+    if (!quitting) {
+      recordDurableCrashBreadcrumb('utility_worker_host_exited', {
+        serviceName: this.serviceName,
+        code,
+        workers: workers.length
+      })
+    }
     const error = new Error(`${this.serviceName} exited (${code})`)
     for (const worker of workers) {
       worker.emit('error', error)

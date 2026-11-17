@@ -8,7 +8,7 @@ import { build } from 'esbuild'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 
 const fork = vi.hoisted(() => vi.fn())
-vi.mock('electron', () => ({ utilityProcess: { fork } }))
+vi.mock('electron', () => ({ app: { once: vi.fn() }, utilityProcess: { fork } }))
 vi.mock('../crash-reporting/breadcrumbs/durable-crash-breadcrumb', () => ({
   recordDurableCrashBreadcrumb: vi.fn()
 }))
