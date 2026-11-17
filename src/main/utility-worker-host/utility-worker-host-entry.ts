@@ -1,4 +1,3 @@
-import { serialize } from 'node:v8'
 import type { Worker } from 'node:worker_threads'
 import { installFatalSignalListenerGuard } from '../crash-reporting/fatal-signal-listener-guard'
 import { spawnWorkerThread } from '../worker-threads/worker-thread-spawn'
@@ -26,19 +25,32 @@ const workers = new Map<number, Worker>()
 
 function failure(error: unknown): UtilityWorkerFailure {
   const value = error instanceof Error ? error : new Error(String(error))
-  const code = (value as NodeJS.ErrnoException).code
-  return { name: value.name, message: value.message, ...(typeof code === 'string' ? { code } : {}) }
+  const code = 'code' in value && typeof value.code === 'string' ? value.code : undefined
+  return { name: value.name, message: value.message, ...(code ? { code } : {}) }
 }
 
-function relay(id: number, message: unknown): void {
-  let bytes: Buffer
-  try {
-    bytes = serialize(message)
-  } catch (error) {
-    port.postMessage({ type: 'error', id, error: failure(error) })
-    void workers.get(id)?.terminate()
-    return
+/**
+ * Runs the entry with its posts already v8-serialized and their buffers moved, not cloned, so this
+ * thread forwards bytes instead of decoding and re-encoding every reply. Patched before the entry
+ * loads, so its own send ledger still sees the original message.
+ */
+function hostedEntrySource(filename: string): string {
+  return `const { parentPort } = require('node:worker_threads')
+const { serialize } = require('node:v8')
+const post = parentPort.postMessage.bind(parentPort)
+Object.defineProperty(parentPort, 'postMessage', {
+  configurable: true,
+  writable: true,
+  value: (message) => {
+    const bytes = serialize(message)
+    const owned = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
+    post(bytes, owned ? [bytes.buffer] : [])
   }
+})
+require(${JSON.stringify(filename)})`
+}
+
+function relay(id: number, bytes: Uint8Array): void {
   for (let start = 0; start < bytes.byteLength; start += UTILITY_WORKER_MESSAGE_CHUNK_BYTES) {
     const end = Math.min(start + UTILITY_WORKER_MESSAGE_CHUNK_BYTES, bytes.byteLength)
     const view = bytes.subarray(start, end)
@@ -55,13 +67,14 @@ port.on('message', ({ data: request }) => {
       if (request.largeSendLog) {
         setWorkerLargeSendLog(request.largeSendLog)
       }
-      const worker = spawnWorkerThread(request.filename, {
+      const worker = spawnWorkerThread(hostedEntrySource(request.filename), {
+        eval: true,
         name: request.name,
         workerData: request.workerData,
         execArgv: []
       })
       workers.set(id, worker)
-      worker.on('message', (message: unknown) => relay(id, message))
+      worker.on('message', (bytes: Uint8Array) => relay(id, bytes))
       worker.on('error', (error) => port.postMessage({ type: 'error', id, error: failure(error) }))
       worker.once('exit', (code) => {
         workers.delete(id)
