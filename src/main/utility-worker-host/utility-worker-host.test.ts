@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { Worker } from 'node:worker_threads'
 import { build } from 'esbuild'
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const fork = vi.hoisted(() => vi.fn())
 vi.mock('electron', () => ({ app: { once: vi.fn() }, utilityProcess: { fork } }))
@@ -18,6 +18,7 @@ const { UtilityWorkerHost } = await import('./utility-worker-host')
 let root = ''
 let hostEntry = ''
 let echoEntry = ''
+let quietEntry = ''
 
 beforeAll(async () => {
   root = mkdtempSync(join(tmpdir(), 'orca-utility-worker-host-'))
@@ -39,6 +40,10 @@ parentPort.on('message', (message) =>
   parentPort.postMessage(message.bytes ? new Uint8Array(message.bytes).fill(7) : { echo: message })
 )`
   )
+})
+beforeAll(() => {
+  quietEntry = join(root, 'quiet.js')
+  writeFileSync(quietEntry, 'setInterval(() => undefined, 1000)')
 })
 afterAll(() => rmSync(root, { recursive: true, force: true }))
 
@@ -90,6 +95,8 @@ function nextExit(worker: { once(event: 'exit', listener: (code: number) => void
 }
 
 describe('UtilityWorkerHost', () => {
+  beforeEach(() => fork.mockReset())
+
   it('relays a hosted worker both ways, including a message past one IPC chunk', async () => {
     fork.mockImplementation(threadUtilityProcess)
     const worker = newHost().spawn({
@@ -121,6 +128,21 @@ describe('UtilityWorkerHost', () => {
     expect(await nextMessage(worker)).toEqual({ hello: 'b' })
     expect(await nextMessage(worker)).toEqual({ echo: 'queued' })
     await worker.terminate()
+  })
+
+  it('ends a worker terminated before its first message without giving up the host', async () => {
+    fork.mockImplementation(threadUtilityProcess)
+    const host = newHost()
+    const quiet = host.spawn({ filename: quietEntry, name: 'orca-journal-sql-reader' })
+    await expect(quiet.terminate()).resolves.toEqual(expect.any(Number))
+    const echo = host.spawn({
+      filename: echoEntry,
+      name: 'orca-journal-sql-reader',
+      workerData: { tag: 'd' }
+    })
+    expect(await nextMessage(echo)).toEqual({ hello: 'd' })
+    expect(fork).toHaveBeenCalledTimes(1)
+    await echo.terminate()
   })
 
   it('fails its workers when a running host dies', async () => {

@@ -1,6 +1,6 @@
 import { STT_UTILITY_PROCESS_NAME } from '../../speech/stt-worker-process'
 import { BACKEND_UTILITY_PROCESS_NAME } from '../../../shared/backend/backend-service-contract'
-import { JOURNAL_SQL_READER_HOST_NAME } from '../../native-chat/agent-session-journal/journal-sql-reader-spawn'
+import { JOURNAL_SQL_READER_HOST_NAME } from '../../native-chat/agent-session-journal/journal-sql-reader-host-name'
 
 export type ProcessGoneSource = 'renderer' | 'child'
 export type ExpectedTeardownScope = 'none' | 'renderer-reload' | 'app-shutdown'

@@ -1,8 +1,6 @@
 import type { Worker } from 'node:worker_threads'
 import { spawnWorkerThread } from '../../worker-threads/worker-thread-spawn'
 
-export const JOURNAL_SQL_READER_HOST_NAME = 'Orca chat reader'
-
 export type JournalSqlReaderWorker = Pick<
   Worker,
   'postMessage' | 'ref' | 'unref' | 'terminate' | 'on' | 'once'

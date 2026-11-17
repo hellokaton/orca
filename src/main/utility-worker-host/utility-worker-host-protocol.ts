@@ -4,6 +4,8 @@ export type UtilityWorkerSpawn = {
   filename: string
   name: WorkerThreadRole
   workerData?: unknown
+  /** Where the worker logs sends big enough to take down a receiver; set only with log consent. */
+  largeSendLog?: string
 }
 
 export type UtilityWorkerHostRequest =

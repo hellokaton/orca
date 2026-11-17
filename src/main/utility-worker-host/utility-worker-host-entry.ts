@@ -2,6 +2,7 @@ import { serialize } from 'node:v8'
 import type { Worker } from 'node:worker_threads'
 import { installFatalSignalListenerGuard } from '../crash-reporting/fatal-signal-listener-guard'
 import { spawnWorkerThread } from '../worker-threads/worker-thread-spawn'
+import { setWorkerLargeSendLog } from '../worker-threads/worker-send-ledger'
 import {
   UTILITY_WORKER_MESSAGE_CHUNK_BYTES,
   type UtilityWorkerFailure,
@@ -51,6 +52,9 @@ port.on('message', ({ data: request }) => {
   if (request.type === 'spawn') {
     const { id } = request
     try {
+      if (request.largeSendLog) {
+        setWorkerLargeSendLog(request.largeSendLog)
+      }
       const worker = spawnWorkerThread(request.filename, {
         name: request.name,
         workerData: request.workerData,

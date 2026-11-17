@@ -14,11 +14,12 @@ import { readSamplingProfile, summarizeSamplingProfile } from './heap-allocation
 const SAMPLING_INTERVAL_BYTES = 512 * 1024
 const GB = 2 ** 30
 const MB = 2 ** 20
-const START_BYTES = 1.5 * GB
-const STOP_BYTES = 1 * GB
+// Early enough that a fast fill from here to the cage limit is still sampled.
+const START_BYTES = 1 * GB
+const STOP_BYTES = 0.75 * GB
 const FIRST_READ_BYTES = 2.5 * GB
 // Each read runs a full GC on main, so later reads wait for real growth.
-const READ_GROWTH_BYTES = 256 * MB
+const READ_GROWTH_BYTES = 512 * MB
 const ANNOTATED_SITES = 2
 const ANNOTATION_MAX_LENGTH = 127
 
@@ -97,6 +98,8 @@ function stop(): void {
   } catch {
     // Diagnostics only.
   }
+  // Sites from an earlier peak would mislead a later, unrelated crash.
+  annotateCrashReport({})
 }
 
 function read(current: Sampling, totalBytes: number, mainBytes: number): void {

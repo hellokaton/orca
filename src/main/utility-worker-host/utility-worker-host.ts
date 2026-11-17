@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events'
 import { deserialize } from 'node:v8'
 import type { Worker } from 'node:worker_threads'
 import { app, utilityProcess, type UtilityProcess } from 'electron'
+import type { CrashReportBreadcrumbData } from '../../shared/crash-reporting/crash-reporting'
 import { recordDurableCrashBreadcrumb } from '../crash-reporting/breadcrumbs/durable-crash-breadcrumb'
 import type {
   UtilityWorkerFailure,
@@ -14,6 +15,7 @@ import type {
 const HOST_READY_TIMEOUT_MS = 4_000
 const HOST_IDLE_EXIT_MS = 30_000
 
+/** Electron stops utility processes as it quits; those exits are not failures. */
 let quitting = false
 
 export type HostedWorkerThread = Pick<
@@ -46,8 +48,13 @@ class HostedWorker extends EventEmitter {
   private chunks: Uint8Array[] = []
   private exitCode?: number
   private readonly exited = Promise.withResolvers<number>()
+  /** Posts a worker hasn't answered yet, replayed if it moves in-process. */
+  private unheardPosts: unknown[] = []
   /** A worker that has said nothing yet can still move in-process unnoticed. */
   heard = false
+  terminating = false
+  lastReplyType: string | null = null
+  receivedBytes = 0
 
   constructor(
     readonly id: number,
@@ -61,6 +68,9 @@ class HostedWorker extends EventEmitter {
     if (this.local) {
       this.local.postMessage(message)
     } else if (this.exitCode === undefined) {
+      if (!this.heard) {
+        this.unheardPosts.push(message)
+      }
       this.send({ type: 'post', id: this.id, message })
     }
   }
@@ -74,6 +84,7 @@ class HostedWorker extends EventEmitter {
   }
 
   terminate(): Promise<number> {
+    this.terminating = true
     if (this.local) {
       return this.local.terminate()
     }
@@ -83,28 +94,26 @@ class HostedWorker extends EventEmitter {
     return this.exited.promise
   }
 
-  adopt(local: Worker, replay: readonly UtilityWorkerHostRequest[]): void {
+  adopt(local: Worker): void {
     this.local = local
     local.on('message', (message: unknown) => this.emit('message', message))
     local.on('error', (error) => this.emit('error', error))
     local.once('exit', (code) => this.finish(code))
-    for (const request of replay) {
-      if (request.type === 'post') {
-        local.postMessage(request.message)
-      } else if (request.type === 'terminate') {
-        void local.terminate()
-      }
+    for (const message of this.unheardPosts.splice(0)) {
+      local.postMessage(message)
     }
   }
 
   receive(event: Exclude<UtilityWorkerHostEvent, { type: 'ready' }>): void {
     this.heard = true
+    this.unheardPosts = []
     if (event.type === 'error') {
       this.emit('error', restoreFailure(event.error))
     } else if (event.type === 'exit') {
       this.finish(event.code)
     } else {
       this.chunks.push(event.bytes)
+      this.receivedBytes += event.bytes.byteLength
       if (event.more) {
         return
       }
@@ -117,6 +126,10 @@ class HostedWorker extends EventEmitter {
         this.emit('error', error)
         return
       }
+      this.lastReplyType =
+        message && typeof message === 'object' && 'type' in message && typeof message.type === 'string'
+          ? message.type
+          : null
       this.emit('message', message)
     }
   }
@@ -147,7 +160,7 @@ export class UtilityWorkerHost {
     private readonly entryPath: () => string,
     private readonly spawnInProcess: (spawn: UtilityWorkerSpawn) => Worker
   ) {
-    app.once('before-quit', () => {
+    app.once('will-quit', () => {
       quitting = true
     })
   }
@@ -226,8 +239,8 @@ export class UtilityWorkerHost {
     if (!worker) {
       return
     }
-    // A worker that dies before saying anything could not load here; run it in-process instead.
-    if (!worker.heard && event.type !== 'message') {
+    // A worker that dies unasked before saying anything could not load here; run it in-process.
+    if (!worker.heard && !worker.terminating && event.type !== 'message') {
       this.giveUp(host, 'worker-start-failed')
       return
     }
@@ -252,7 +265,10 @@ export class UtilityWorkerHost {
   }
 
   /** Workers that never ran here move in-process; the rest fail as if their thread died. */
-  private giveUp(host: Host, reason: 'ready-timeout' | 'worker-start-failed'): void {
+  private giveUp(
+    host: Host,
+    reason: 'ready-timeout' | 'exited-before-ready' | 'worker-start-failed'
+  ): void {
     if (host.retired) {
       return
     }
@@ -262,20 +278,18 @@ export class UtilityWorkerHost {
       reason,
       workers: host.workers.size
     })
-    const queued = host.queued.splice(0)
     const workers = [...host.workers.values()]
     this.retire(host)
     host.child.kill()
     for (const worker of workers) {
-      if (worker.heard) {
+      if (worker.terminating) {
+        worker.finish(0)
+      } else if (worker.heard) {
         worker.emit('error', new Error(`${this.serviceName} stopped`))
         worker.finish(1)
-        continue
+      } else {
+        worker.adopt(this.spawnInProcess(worker.spawn))
       }
-      worker.adopt(
-        this.spawnInProcess(worker.spawn),
-        queued.filter((request) => request.id === worker.id && request.type !== 'spawn')
-      )
     }
   }
 
@@ -284,17 +298,22 @@ export class UtilityWorkerHost {
       return
     }
     if (!host.ready) {
-      this.giveUp(host, 'ready-timeout')
+      this.giveUp(host, 'exited-before-ready')
       return
     }
     const workers = [...host.workers.values()]
     this.retire(host)
     if (!quitting) {
-      recordDurableCrashBreadcrumb('utility_worker_host_exited', {
+      const data: CrashReportBreadcrumbData = {
         serviceName: this.serviceName,
         code,
         workers: workers.length
+      }
+      workers.forEach((worker, index) => {
+        data[`w${index}_lastReply`] = worker.lastReplyType
+        data[`w${index}_receivedMB`] = Math.round(worker.receivedBytes / 2 ** 20)
       })
+      recordDurableCrashBreadcrumb('utility_worker_host_exited', data)
     }
     const error = new Error(`${this.serviceName} exited (${code})`)
     for (const worker of workers) {
