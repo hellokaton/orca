@@ -42,6 +42,13 @@ function restoreFailure(failure: UtilityWorkerFailure): Error {
   return error
 }
 
+/** A child still launching has no PID to kill yet; kill it once it has one. */
+function stopChild(host: Host): void {
+  if (!host.child.kill()) {
+    host.child.once('spawn', () => host.child.kill())
+  }
+}
+
 /** Main-side stand-in for a worker thread that runs inside the utility process. */
 class HostedWorker extends EventEmitter {
   private local?: Worker
@@ -258,7 +265,7 @@ export class UtilityWorkerHost {
     host.idleTimer = setTimeout(() => {
       if (host.workers.size === 0) {
         this.retire(host)
-        host.child.kill()
+        stopChild(host)
       }
     }, HOST_IDLE_EXIT_MS)
     host.idleTimer.unref?.()
@@ -280,7 +287,7 @@ export class UtilityWorkerHost {
     })
     const workers = [...host.workers.values()]
     this.retire(host)
-    host.child.kill()
+    stopChild(host)
     for (const worker of workers) {
       if (worker.terminating) {
         worker.finish(0)

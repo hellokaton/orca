@@ -61,7 +61,10 @@ require(workerData)`,
   const child = Object.assign(new EventEmitter(), {
     stderr: null,
     postMessage: (message: unknown) => thread.postMessage(message),
-    kill: () => void thread.terminate()
+    kill: () => {
+      void thread.terminate()
+      return true
+    }
   })
   thread.on('message', (message) => child.emit('message', message))
   thread.on('exit', (code) => child.emit('exit', code))
@@ -72,7 +75,10 @@ function silentUtilityProcess(): EventEmitter & { postMessage(): void; kill(): v
   const child = Object.assign(new EventEmitter(), {
     stderr: null,
     postMessage: () => undefined,
-    kill: () => queueMicrotask(() => child.emit('exit', 9))
+    kill: () => {
+      queueMicrotask(() => child.emit('exit', 9))
+      return true
+    }
   })
   queueMicrotask(() => child.emit('exit', 1))
   return child
